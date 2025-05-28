@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"tvscraper/epselectors"
+	"tvscraper/models"
 	documentcrawler "tvscraper/utils"
 
 	"golang.org/x/net/html"
@@ -15,15 +17,6 @@ import (
 
 // TODO criar mecanismo para verificar disponibilidade e buscar links alternativos
 var mainUrl string = "https://eztvx.to"
-
-type EpInfo struct {
-	EpName string
-	EpLink string
-}
-
-type EpisodesList struct {
-	Episodes *[]EpInfo
-}
 
 func FetchEztvSeason(seriesName string, season string) (*[]string, error) {
 
@@ -48,17 +41,19 @@ func FetchEztvSeason(seriesName string, season string) (*[]string, error) {
 			continue
 		}
 
-		epInfo := findBestMatch(epInfos)
-		if epInfo != nil {
-			fmt.Printf("\nBest match for episode %v s%s is %s\n", epNum, season, epInfo.EpName)
-			foundLinks = append(foundLinks, epInfo.EpLink)
+		acceptedEps := acceptOrRejectEpisodes(seriesName, epInfos)
+		if acceptedEps != nil {
+			for _, ep := range *acceptedEps {
+				fmt.Printf("\nBest match for episode %v s%s is %s\n", epNum, season, ep.EpName)
+				foundLinks = append(foundLinks, ep.EpLink)
+			}
 		}
 	}
 
 	return getMagnetLinks(&foundLinks)
 }
 
-func fetchEpisode(seriesName string, season string, epNumber int16) (*[]EpInfo, error) {
+func fetchEpisode(seriesName string, season string, epNumber int16) (*[]models.EpInfo, error) {
 
 	fmt.Printf("\n\nFetching episode %v from season %s of %s from EZTV...\n", epNumber, season, seriesName)
 	search := fmt.Sprintf("%s-%s%s", strings.Replace(seriesName, " ", "-", -1), getSeasonString(season), getEpisodeNumberString(epNumber))
@@ -108,7 +103,7 @@ func getFromUrl(targetUrl string) (*http.Response, error) {
 	return resp, nil
 }
 
-func parseSearchResults(reader io.Reader) (*[]EpInfo, error) {
+func parseSearchResults(reader io.Reader) (*[]models.EpInfo, error) {
 
 	doc, err := documentcrawler.NewDocumentCrawler(reader)
 	if err != nil {
@@ -116,10 +111,10 @@ func parseSearchResults(reader io.Reader) (*[]EpInfo, error) {
 		return nil, fmt.Errorf("creating document crawler")
 	}
 
-	results := &[]EpInfo{}
+	results := &[]models.EpInfo{}
 	doc.ForEachElement(func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "a" && documentcrawler.HasClass(n, "epinfo") {
-			epInfo := &EpInfo{EpName: n.FirstChild.Data}
+			epInfo := &models.EpInfo{EpName: n.FirstChild.Data}
 
 			for _, attr := range n.Attr {
 				if attr.Key == "href" {
@@ -152,13 +147,21 @@ var availableResolutions []string = []string{
 var minimumResolution string = "480p"
 var preferedResolution string = "1080p"
 
-func findBestMatch(episodes *[]EpInfo) *EpInfo {
-	episodes = filterByResolution(episodes)
-	return &(*episodes)[0]
+func acceptOrRejectEpisodes(seriesName string, episodes *[]models.EpInfo) *[]models.EpInfo {
+	acceptableOptions := make([]models.EpInfo, 0)
+	for _, ep := range *episodes {
+		selector := epselectors.EpSelector{Episode: &ep, SeriesName: seriesName}
+		if selector.AcceptOrReject() {
+			acceptableOptions = append(acceptableOptions, ep)
+		}
+	}
+	//episodes = filterByResolution(&acceptableOptions)
+	//return &(*episodes)[0]
+	return &acceptableOptions
 }
 
-func filterByResolution(episodes *[]EpInfo) *[]EpInfo {
-	episodesByResolution := make(map[string]EpisodesList)
+func filterByResolution(episodes *[]models.EpInfo) *[]models.EpInfo {
+	episodesByResolution := make(map[string]models.EpisodesList)
 	preferedResolutionIndex := 0
 	minimumResolutionIndex := 0
 
@@ -174,8 +177,8 @@ func filterByResolution(episodes *[]EpInfo) *[]EpInfo {
 			if strings.Contains(ep.EpName, " "+resolution+" ") {
 				_, ok := episodesByResolution[resolution]
 				if !ok {
-					epList := make([]EpInfo, 0)
-					episodesByResolution[resolution] = EpisodesList{Episodes: &epList}
+					epList := make([]models.EpInfo, 0)
+					episodesByResolution[resolution] = models.EpisodesList{Episodes: &epList}
 				}
 				//fmt.Printf("\nAdding ep %s to resolution %s\n", ep, resolution)
 				*episodesByResolution[resolution].Episodes = append(*episodesByResolution[resolution].Episodes, ep)
@@ -189,7 +192,7 @@ func filterByResolution(episodes *[]EpInfo) *[]EpInfo {
 	}
 
 	if preferedResolutionIndex <= minimumResolutionIndex {
-		return &[]EpInfo{}
+		return &[]models.EpInfo{}
 	}
 
 	for i := len(availableResolutions) - 1; i >= minimumResolutionIndex; i-- {
@@ -200,7 +203,7 @@ func filterByResolution(episodes *[]EpInfo) *[]EpInfo {
 		}
 	}
 
-	return &[]EpInfo{}
+	return &[]models.EpInfo{}
 }
 
 func getMagnetLinks(links *[]string) (*[]string, error) {

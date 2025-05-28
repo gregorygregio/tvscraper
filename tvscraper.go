@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"tvscraper/clients"
-	eztv "tvscraper/sources"
+	eztv "tvscraper/eztv"
 	"tvscraper/utils"
 )
 
