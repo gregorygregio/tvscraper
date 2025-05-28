@@ -5,34 +5,87 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
-	"tvscraper/clients"
-	"tvscraper/utils"
 	documentcrawler "tvscraper/utils"
 
 	"golang.org/x/net/html"
 )
 
+// TODO criar mecanismo para verificar disponibilidade e buscar links alternativos
 var mainUrl string = "https://eztvx.to"
 
-func SendMagnetToQBitTorrent(magnetLink string) {
-	fmt.Println("Iniciando SentMagnetToQBitTorrent")
+type EpInfo struct {
+	EpName string
+	EpLink string
+}
 
-	username, _ := utils.GetConfig("username")
-	password, _ := utils.GetConfig("password")
+type EpisodesList struct {
+	Episodes *[]EpInfo
+}
 
-	qbitClient := &clients.QBitTorrentClient{}
-	qbitClient.SetSettings("192.168.0.182", "8081", username, password, false)
+func FetchEztvSeason(seriesName string, season string) (*[]string, error) {
 
-	err := qbitClient.SendMagnet(magnetLink)
-	if err != nil {
-		fmt.Println("Erro ao enviar magnet para qbitTorrent")
-	} else {
-		fmt.Println("Magnet enviado com sucesso")
+	//provisório
+	// episodeNumbers := make([]int16, 10)
+	// for i := 0; i < len(episodeNumbers); i++ {
+	// 	episodeNumbers[i] = (int16)(i + 1)
+	// }
+
+	episodeNumbers := make([]int16, 1)
+	for i := 0; i < len(episodeNumbers); i++ {
+		episodeNumbers[i] = (int16)(i + 1)
 	}
 
-	fmt.Println("Fim SentMagnetToQBitTorrent")
+	fmt.Printf("Fetching season %s for series %s from EZTV...\n", season, seriesName)
+	foundLinks := make([]string, 0)
+
+	for _, epNum := range episodeNumbers {
+		epInfos, err := fetchEpisode(seriesName, season, epNum)
+		if err != nil {
+			fmt.Printf("Error fetching episode %v - season %s of '%s'\n", epNum, season, seriesName)
+			continue
+		}
+
+		epInfo := findBestMatch(epInfos)
+		if epInfo != nil {
+			fmt.Printf("\nBest match for episode %v s%s is %s\n", epNum, season, epInfo.EpName)
+			foundLinks = append(foundLinks, epInfo.EpLink)
+		}
+	}
+
+	return getMagnetLinks(&foundLinks)
+}
+
+func fetchEpisode(seriesName string, season string, epNumber int16) (*[]EpInfo, error) {
+
+	fmt.Printf("\n\nFetching episode %v from season %s of %s from EZTV...\n", epNumber, season, seriesName)
+	search := fmt.Sprintf("%s-%s%s", strings.Replace(seriesName, " ", "-", -1), getSeasonString(season), getEpisodeNumberString(epNumber))
+	targetUrl := fmt.Sprintf("%s/search/%s", getBaseUrl(), search)
+
+	fmt.Printf("Fetching URL: %s \n", targetUrl)
+
+	resp, err := getFromUrl(targetUrl)
+	if err != nil {
+		fmt.Printf("Error fetching URL %s: %s\n", targetUrl, err.Error())
+		return nil, fmt.Errorf("error fetching URL %s", targetUrl)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Error: received status code %d from %s", resp.StatusCode, targetUrl)
+		return nil, fmt.Errorf("error: received status code %d from %s", resp.StatusCode, targetUrl)
+	}
+
+	foundEpisodes, err := parseSearchResults(resp.Body)
+	if err != nil {
+		fmt.Printf("Error parsing search results: %s\n", err.Error())
+		return nil, fmt.Errorf("error parsing search results")
+	}
+
+	return foundEpisodes, nil
 }
 
 func getFromUrl(targetUrl string) (*http.Response, error) {
@@ -55,38 +108,7 @@ func getFromUrl(targetUrl string) (*http.Response, error) {
 	return resp, nil
 }
 
-func FetchEztvSeason(seriesName string, season string) (*[]string, error) {
-
-	fmt.Printf("Fetching season %s for series %s from EZTV...\n", season, seriesName)
-
-	search := fmt.Sprintf("%s-%s", strings.Replace(seriesName, " ", "-", -1), getSeasonString(season))
-	targetUrl := fmt.Sprintf("%s/search/%s", getBaseUrl(), search)
-
-	fmt.Printf("Fetching URL: %s \n", targetUrl)
-
-	resp, err := getFromUrl(targetUrl)
-	if err != nil {
-		fmt.Printf("Error fetching URL %s: %s\n", targetUrl, err.Error())
-		return nil, fmt.Errorf("error fetching URL %s", targetUrl)
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Error: received status code %d from %s", resp.StatusCode, targetUrl)
-		return nil, fmt.Errorf("error: received status code %d from %s", resp.StatusCode, targetUrl)
-	}
-
-	foundLinks, err := parseSearchResults(resp.Body)
-	if err != nil {
-		fmt.Printf("Error parsing search results: %s\n", err.Error())
-		return nil, fmt.Errorf("error parsing search results")
-	}
-
-	return getMagnetLinks(foundLinks)
-}
-
-func parseSearchResults(reader io.Reader) (*[]string, error) {
+func parseSearchResults(reader io.Reader) (*[]EpInfo, error) {
 
 	doc, err := documentcrawler.NewDocumentCrawler(reader)
 	if err != nil {
@@ -94,25 +116,91 @@ func parseSearchResults(reader io.Reader) (*[]string, error) {
 		return nil, fmt.Errorf("creating document crawler")
 	}
 
-	results := &[]string{}
+	results := &[]EpInfo{}
 	doc.ForEachElement(func(n *html.Node) {
-		//fmt.Printf("Parsing %s\n", n.Data)
 		if n.Type == html.ElementNode && n.Data == "a" && documentcrawler.HasClass(n, "epinfo") {
-			//TODO filtrar o episódio para que não haja repetição do mesmo ep e para selecionar a resolução correta
+			epInfo := &EpInfo{EpName: n.FirstChild.Data}
+
 			for _, attr := range n.Attr {
 				if attr.Key == "href" {
 					fmt.Printf("Found link: %s\n", attr.Val)
-					*results = append(*results, attr.Val)
+					epInfo.EpLink = attr.Val
+					*results = append(*results, *epInfo)
 				}
 			}
 		}
 	})
 
-	for i := 0; i < len(*results); i++ {
-		fmt.Printf("Result link: %s\n", (*results)[i])
-	}
+	// for i := 0; i < len(*results); i++ {
+	// 	fmt.Printf("Result link: %s\n", (*results)[i])
+	// }
 
 	return results, nil
+}
+
+var availableResolutions []string = []string{
+	"240p",
+	"360p",
+	"480p",
+	"720p",
+	"1080p",
+	"1440p",
+	"2160p",
+	"4320p",
+}
+
+var minimumResolution string = "480p"
+var preferedResolution string = "1080p"
+
+func findBestMatch(episodes *[]EpInfo) *EpInfo {
+	episodes = filterByResolution(episodes)
+	return &(*episodes)[0]
+}
+
+func filterByResolution(episodes *[]EpInfo) *[]EpInfo {
+	episodesByResolution := make(map[string]EpisodesList)
+	preferedResolutionIndex := 0
+	minimumResolutionIndex := 0
+
+	for resolutionIndex, resolution := range availableResolutions {
+		if resolution == preferedResolution {
+			preferedResolutionIndex = resolutionIndex
+		}
+		if resolution == minimumResolution {
+			minimumResolutionIndex = resolutionIndex
+		}
+
+		for _, ep := range *episodes {
+			if strings.Contains(ep.EpName, " "+resolution+" ") {
+				_, ok := episodesByResolution[resolution]
+				if !ok {
+					epList := make([]EpInfo, 0)
+					episodesByResolution[resolution] = EpisodesList{Episodes: &epList}
+				}
+				//fmt.Printf("\nAdding ep %s to resolution %s\n", ep, resolution)
+				*episodesByResolution[resolution].Episodes = append(*episodesByResolution[resolution].Episodes, ep)
+			}
+		}
+	}
+
+	epList, ok := episodesByResolution[preferedResolution]
+	if ok {
+		return epList.Episodes
+	}
+
+	if preferedResolutionIndex <= minimumResolutionIndex {
+		return &[]EpInfo{}
+	}
+
+	for i := len(availableResolutions) - 1; i >= minimumResolutionIndex; i-- {
+		res := availableResolutions[i]
+		epList, ok := episodesByResolution[res]
+		if ok {
+			return epList.Episodes
+		}
+	}
+
+	return &[]EpInfo{}
 }
 
 func getMagnetLinks(links *[]string) (*[]string, error) {
@@ -132,9 +220,7 @@ func getMagnetLinks(links *[]string) (*[]string, error) {
 	}
 
 	wg.Wait()
-	for i := 0; i < len(*results); i++ {
-		fmt.Printf("Magnets Result link: %s\n", (*results)[i])
-	}
+
 	return results, nil
 }
 
@@ -164,7 +250,7 @@ func getMagnetLink(link string) (string, error) {
 		if n.Type == html.ElementNode && n.Data == "a" && documentcrawler.HasAttr(n, "title", "Magnet Link") {
 			for _, attr := range n.Attr {
 				if attr.Key == "href" {
-					fmt.Printf("Found torrent link: %s\n", attr.Val)
+					fmt.Printf("Found torrent link on episode url %s\n", link)
 					torrentLink = attr.Val
 				}
 			}
@@ -199,4 +285,11 @@ func getSeasonString(season string) string {
 		return "s0" + season
 	}
 	return "s" + season
+}
+
+func getEpisodeNumberString(epNum int16) string {
+	if epNum < 10 {
+		return "e" + strconv.Itoa(int(epNum))
+	}
+	return "e0" + strconv.Itoa(int(epNum))
 }
