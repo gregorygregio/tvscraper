@@ -10,6 +10,7 @@ import (
 	"sync"
 	"tvscraper/epselectors"
 	"tvscraper/models"
+	"tvscraper/tmdb"
 	documentcrawler "tvscraper/utils"
 
 	"golang.org/x/net/html"
@@ -18,42 +19,52 @@ import (
 // TODO criar mecanismo para verificar disponibilidade e buscar links alternativos
 var mainUrl string = "https://eztvx.to"
 
-func FetchEztvSeason(seriesName string, season string) (*[]string, error) {
+func FetchEztvSeason(seriesName string, season int32) (*[]string, error) {
 
-	//provisório
-	// episodeNumbers := make([]int16, 10)
-	// for i := 0; i < len(episodeNumbers); i++ {
-	// 	episodeNumbers[i] = (int16)(i + 1)
-	// }
-
-	episodeNumbers := make([]int16, 1)
-	for i := 0; i < len(episodeNumbers); i++ {
-		episodeNumbers[i] = (int16)(i + 1)
+	series, err := tmdb.GetSeries(seriesName)
+	if err != nil {
+		fmt.Printf("Error fetching series %s: %s\n", seriesName, err.Error())
+		return nil, fmt.Errorf("Error fetching series %s: %s\n", seriesName, err.Error())
 	}
+	for _, s := range series {
+		fmt.Printf("%v: %s\n", s.Id, s.Name)
+	}
+
+	episodes, err := tmdb.GetEpisodes(series[0].Id, season)
 
 	fmt.Printf("Fetching season %s for series %s from EZTV...\n", season, seriesName)
+
 	foundLinks := make([]string, 0)
+	var wg sync.WaitGroup
 
-	for _, epNum := range episodeNumbers {
-		epInfos, err := fetchEpisode(seriesName, season, epNum)
-		if err != nil {
-			fmt.Printf("Error fetching episode %v - season %s of '%s'\n", epNum, season, seriesName)
-			continue
-		}
-
-		acceptedEps := acceptOrRejectEpisodes(seriesName, epInfos)
-		if acceptedEps != nil {
-			for _, ep := range *acceptedEps {
-				fmt.Printf("\nBest match for episode %v s%s is %s\n", epNum, season, ep.EpName)
-				foundLinks = append(foundLinks, ep.EpLink)
+	for _, episode := range episodes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			epInfos, err := fetchEpisode(seriesName, season, int16(episode.EpisodeNumber))
+			if err != nil {
+				fmt.Printf("Error fetching episode %v - season %s of '%s'\n", episode.EpisodeNumber, season, seriesName)
+				return
 			}
-		}
+
+			acceptedEps := acceptOrRejectEpisodes(seriesName, epInfos)
+			if acceptedEps != nil {
+				//TODO ordenar por resolução preferida
+				acceptedEps = filterByResolution(acceptedEps)
+
+				for _, ep := range *acceptedEps {
+					fmt.Printf("\nBest match for episode %v s%s is %s\n", episode.EpisodeNumber, season, ep.EpName)
+					foundLinks = append(foundLinks, ep.EpLink)
+				}
+			}
+		}()
 	}
+	wg.Wait()
 
 	return getMagnetLinks(&foundLinks)
 }
 
-func fetchEpisode(seriesName string, season string, epNumber int16) (*[]models.EpInfo, error) {
+func fetchEpisode(seriesName string, season int32, epNumber int16) (*[]models.EpInfo, error) {
 
 	fmt.Printf("\n\nFetching episode %v from season %s of %s from EZTV...\n", epNumber, season, seriesName)
 	search := fmt.Sprintf("%s-%s%s", strings.Replace(seriesName, " ", "-", -1), getSeasonString(season), getEpisodeNumberString(epNumber))
@@ -126,10 +137,6 @@ func parseSearchResults(reader io.Reader) (*[]models.EpInfo, error) {
 		}
 	})
 
-	// for i := 0; i < len(*results); i++ {
-	// 	fmt.Printf("Result link: %s\n", (*results)[i])
-	// }
-
 	return results, nil
 }
 
@@ -155,8 +162,6 @@ func acceptOrRejectEpisodes(seriesName string, episodes *[]models.EpInfo) *[]mod
 			acceptableOptions = append(acceptableOptions, ep)
 		}
 	}
-	//episodes = filterByResolution(&acceptableOptions)
-	//return &(*episodes)[0]
 	return &acceptableOptions
 }
 
@@ -283,7 +288,8 @@ func writeToFile(filename string, data string) {
 func getBaseUrl() string {
 	return mainUrl
 }
-func getSeasonString(season string) string {
+func getSeasonString(seasonNumber int32) string {
+	season := fmt.Sprint(seasonNumber)
 	if len(season) == 1 {
 		return "s0" + season
 	}

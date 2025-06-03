@@ -12,7 +12,7 @@ func main() {
 
 	utils.LoadArguments()
 
-	magnetLinks, err := eztv.FetchEztvSeason("The Office", "01")
+	magnetLinks, err := eztv.FetchEztvSeason("The Office", 1)
 	if err != nil {
 		fmt.Println("Error fetching from Eztv: ", err)
 		return
